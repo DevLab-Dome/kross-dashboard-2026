@@ -1,115 +1,120 @@
 import streamlit as st
-import boto3
-import requests
 import pandas as pd
-import io
+import boto3
+import json
+from botocore.exceptions import NoCredentialsError
 
 st.set_page_config(page_title="Ispettore Cloud", layout="wide")
 
-# CONFIGURAZIONE
+st.title("🕵️‍♂️ Ispettore File Cloud")
+st.markdown("Visualizza e gestisci i file salvati su DigitalOcean Spaces.")
+
+# --- 1. RECUPERO CREDENZIALI (ROBUSTO) ---
 try:
-    DO_REGION = st.secrets["digitalocean"]["region"]
-    DO_ENDPOINT = st.secrets["digitalocean"]["endpoint"]
-    DO_KEY = st.secrets["digitalocean"]["key"]
-    DO_SECRET = st.secrets["digitalocean"]["secret"]
-    DO_BUCKET = st.secrets["digitalocean"]["bucket"]
-except:
-    st.error("Mancano i secrets per DigitalOcean.")
-    st.stop()
-
-BASE_URL = "https://ihosp-kross-archive.sfo3.digitaloceanspaces.com"
-
-STRUCTURE_MAP = {
-    "La Terrazza di Jenny": "La_Terrazza",
-    "Lavagnini My Place": "Lavagnini",     
-    "B&B Pitti Palace": "Pitti_Palace"
-}
-
-def get_s3_client():
-    return boto3.client('s3', region_name=DO_REGION, endpoint_url=DO_ENDPOINT,
-                        aws_access_key_id=DO_KEY, aws_secret_access_key=DO_SECRET)
-
-st.title("🕵️‍♂️ Ispettore Cloud: Diagnostica File")
-st.markdown("Questa pagina verifica perché la Dashboard non vede i file che hai caricato.")
-
-col1, col2, col3 = st.columns(3)
-struttura = col1.selectbox("Struttura", list(STRUCTURE_MAP.keys()))
-anno = col2.selectbox("Anno", [2024, 2025, 2026], index=1)
-cartella_target = col3.selectbox("Cartella Target", ["Forecast", "History_Baseline"], index=1)
-
-folder_name = STRUCTURE_MAP[struttura]
-full_path = f"{cartella_target}/{folder_name}/{anno}"
-
-st.divider()
-
-st.subheader(f"1. Analisi Cartella: `{full_path}`")
-
-s3 = get_s3_client()
-
-# VERIFICA 1: BOTO3 (Accesso con Chiavi - Vede anche file privati/nascosti)
-st.write("**🔍 Controllo 1: Accesso Amministratore (Boto3)**")
-try:
-    resp = s3.list_objects_v2(Bucket=DO_BUCKET, Prefix=full_path)
-    if 'Contents' in resp:
-        files = [obj['Key'] for obj in resp['Contents']]
-        st.success(f"✅ Trovati {len(files)} oggetti fisici nel Cloud.")
-        for f in files:
-            st.code(f)
+    if "digitalocean" in st.secrets:
+        secrets = st.secrets["digitalocean"]
     else:
-        st.error("❌ La cartella è VUOTA fisicamente su DigitalOcean.")
+        secrets = st.secrets
+
+    DO_ACCESS_KEY = secrets.get("access_key")
+    DO_SECRET_KEY = secrets.get("secret_key")
+    DO_REGION = secrets.get("region", "sfo3")
+    DO_ENDPOINT = secrets.get("endpoint", "https://sfo3.digitaloceanspaces.com")
+    DO_BUCKET = secrets.get("bucket_name", "ihosp-kross-archive")
+
+    if not DO_ACCESS_KEY or not DO_SECRET_KEY:
+        st.error("❌ Chiavi non trovate nei Secrets.")
         st.stop()
 except Exception as e:
-    st.error(f"Errore connessione Boto3: {e}")
+    st.error(f"❌ Errore Secrets: {e}")
+    st.stop()
+
+# --- 2. CONNESSIONE ---
+def get_s3_client():
+    session = boto3.session.Session()
+    return session.client('s3',
+                          region_name=DO_REGION,
+                          endpoint_url=DO_ENDPOINT,
+                          aws_access_key_id=DO_ACCESS_KEY,
+                          aws_secret_access_key=DO_SECRET_KEY)
+
+# --- 3. SELEZIONE ---
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    folder_type = st.selectbox("Tipo Cartella", ["Forecast", "History_Baseline"])
+
+with col2:
+    structure_map = {
+        "Lavagnini My Place": "Lavagnini", 
+        "La Terrazza di Jenny": "La_Terrazza", 
+        "B&B Pitti Palace": "Pitti_Palace"
+    }
+    selected_label = st.selectbox("Struttura", list(structure_map.keys()))
+    folder_struct = structure_map[selected_label]
+
+with col3:
+    # Opzione per selezionare l'anno
+    selected_year = st.selectbox("Anno", [2024, 2025, 2026, 2027], index=2)
+
+# --- 4. LISTA FILE ---
+s3 = get_s3_client()
+prefix = f"{folder_type}/{folder_struct}/{selected_year}/"
+
+if st.button("🔄 Aggiorna Lista"):
+    st.rerun()
 
 st.divider()
+st.subheader(f"📂 File in: `{prefix}`")
 
-# VERIFICA 2: FILE INDEX.JSON (Necessario per la Dashboard)
-st.write("**🔍 Controllo 2: Esistenza Indice (index.json)**")
-index_key = f"{full_path}/index.json"
 try:
-    s3.head_object(Bucket=DO_BUCKET, Key=index_key)
-    st.success("✅ File `index.json` presente.")
-except:
-    st.error("❌ File `index.json` MANCANTE. La Dashboard è cieca senza questo file.")
-    st.info("💡 SOLUZIONE: Vai su 'Carica Dati' -> Tab 'Sincronizzazione' -> Premi 'Sincronizza TUTTI'.")
-
-st.divider()
-
-# VERIFICA 3: ACCESSO PUBBLICO (Requests - Come fa la Dashboard)
-st.write("**🔍 Controllo 3: Accesso Pubblico (HTTP)**")
-public_url = f"{BASE_URL}/{full_path}/index.json"
-st.write(f"Test connessione a: `{public_url}`")
-
-resp_pub = requests.get(public_url)
-if resp_pub.status_code == 200:
-    st.success("✅ L'indice è PUBBLICO e leggibile dalla Dashboard.")
-    st.json(resp_pub.json())
-elif resp_pub.status_code == 403:
-    st.error("⛔ ERRORE 403 (Forbidden): Il file esiste ma è PRIVATO.")
-    st.markdown("""
-    **SOLUZIONE:** 1. Vai su DigitalOcean Spaces.
-    2. Seleziona i file.
-    3. Clicca su "Actions" -> "Permission" -> **"Public"**.
-    4. Oppure ricaricali dalla pagina 'Carica Dati' che li rende pubblici in automatico.
-    """)
-elif resp_pub.status_code == 404:
-    st.error("❌ ERRORE 404 (Not Found): L'URL pubblico non trova il file.")
-
-st.divider()
-st.subheader("🛠 Azioni Rapide")
-if st.button("☢️ FORZA CREAZIONE INDICE ORA"):
-    try:
-        # Legge file reali
-        resp = s3.list_objects_v2(Bucket=DO_BUCKET, Prefix=full_path)
-        real_files = [obj['Key'].split('/')[-1] for obj in resp.get('Contents', []) 
-                      if obj['Key'].endswith('.xlsx') and not obj['Key'].startswith('~$')]
-        real_files.sort(reverse=True)
+    response = s3.list_objects_v2(Bucket=DO_BUCKET, Prefix=prefix)
+    
+    if 'Contents' in response:
+        files = response['Contents']
         
-        # Scrive index
-        import json
-        s3.put_object(Bucket=DO_BUCKET, Key=index_key, 
-                      Body=json.dumps(real_files), ACL='public-read', ContentType='application/json')
-        st.success(f"✅ Indice rigenerato con {len(real_files)} file!")
-        st.rerun()
-    except Exception as e:
-        st.error(str(e))
+        # Creiamo una tabella carina
+        data = []
+        for obj in files:
+            file_name = obj['Key'].split('/')[-1] # Prende solo il nome finale
+            if file_name and file_name != "index.json": # Ignoriamo index e cartelle vuote
+                # Convertiamo dimensione in KB
+                size_kb = round(obj['Size'] / 1024, 1)
+                last_mod = obj['LastModified'].strftime("%d/%m/%Y %H:%M")
+                data.append({"Nome File": file_name, "Data Caricamento": last_mod, "Dimensione (KB)": size_kb, "Full Key": obj['Key']})
+        
+        if data:
+            df = pd.DataFrame(data)
+            # Mostra tabella
+            st.dataframe(df[["Nome File", "Data Caricamento", "Dimensione (KB)"]], use_container_width=True)
+            
+            # --- ZONA PERICOLO: ELIMINAZIONE ---
+            st.write("---")
+            st.warning("⚠️ Area Gestione (Attenzione: le cancellazioni sono definitive)")
+            
+            file_to_delete = st.selectbox("Seleziona un file da eliminare:", df["Nome File"].tolist())
+            
+            if st.button(f"🗑️ ELIMINA {file_to_delete}"):
+                full_key_to_del = df[df["Nome File"] == file_to_delete].iloc[0]["Full Key"]
+                s3.delete_object(Bucket=DO_BUCKET, Key=full_key_to_del)
+                st.success(f"File {file_to_delete} eliminato.")
+                
+                # Rigenera index.json dopo cancellazione
+                current_files = [f for f in df["Nome File"].tolist() if f != file_to_delete]
+                index_key = f"{prefix}index.json"
+                s3.put_object(
+                    Bucket=DO_BUCKET, 
+                    Key=index_key, 
+                    Body=json.dumps(current_files), 
+                    ACL='public-read',
+                    ContentType='application/json'
+                )
+                st.rerun() # Ricarica pagina
+                
+        else:
+            st.info("Nessun file Excel trovato in questa cartella.")
+    else:
+        st.info("Cartella vuota o non esistente.")
+
+except Exception as e:
+    st.error(f"Errore di connessione: {e}")
