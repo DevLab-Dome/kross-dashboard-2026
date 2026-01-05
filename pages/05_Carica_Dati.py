@@ -5,7 +5,8 @@ import json
 import io
 from botocore.exceptions import NoCredentialsError
 
-st.set_page_config(page_title="Carica Dati", layout="centered")
+# --- CORREZIONE QUI: layout="wide" per allinearla alle altre pagine ---
+st.set_page_config(page_title="Carica Dati", layout="wide")
 
 st.title("☁️ Caricamento Dati su Cloud")
 
@@ -38,17 +39,16 @@ def get_s3_client():
                           aws_access_key_id=DO_ACCESS_KEY,
                           aws_secret_access_key=DO_SECRET_KEY)
 
-# --- 3. INTERFACCIA DI SELEZIONE (PRIMA DEL FILE) ---
+# --- 3. INTERFACCIA DI SELEZIONE ---
 st.subheader("1. Impostazioni Destinazione")
 
+# Usiamo colonne per non sprecare spazio in larghezza
 c1, c2, c3 = st.columns(3)
 
 with c1:
-    # Tipo di dato
     folder_type = st.radio("Tipo Cartella:", ["Forecast", "History_Baseline"])
 
 with c2:
-    # Selezione Struttura
     structure_map = {
         "Lavagnini My Place": "Lavagnini", 
         "La Terrazza di Jenny": "La_Terrazza", 
@@ -58,7 +58,6 @@ with c2:
     folder_struct = structure_map[selected_label]
 
 with c3:
-    # Selezione Anno (MANUALE come richiesto)
     selected_year = st.number_input("Anno:", min_value=2023, max_value=2030, value=2026)
 
 st.divider()
@@ -70,10 +69,9 @@ uploaded_file = st.file_uploader("Seleziona il file Excel", type=["xlsx", "xls"]
 if uploaded_file:
     st.write(f"📄 File pronto per l'upload: **{uploaded_file.name}**")
     
-    # Percorso finale costruito con le selezioni fatte sopra
     target_path = f"{folder_type}/{folder_struct}/{selected_year}/{uploaded_file.name}"
     
-    if st.button("🚀 Conferma e Carica su Cloud"):
+    if st.button("🚀 Conferma e Carica su Cloud", use_container_width=True): # Pulsante largo
         s3 = get_s3_client()
         index_path = f"{folder_type}/{folder_struct}/{selected_year}/index.json"
         
@@ -90,11 +88,10 @@ if uploaded_file:
                     content = obj['Body'].read().decode('utf-8')
                     file_list = json.loads(content)
                 except:
-                    file_list = [] # Se non esiste, crea lista vuota
+                    file_list = [] 
                 
                 if uploaded_file.name not in file_list:
                     file_list.append(uploaded_file.name)
-                    # Ordina per avere i file più recenti in alto (se hanno data nel nome)
                     file_list.sort(reverse=True)
                     
                     s3.put_object(
