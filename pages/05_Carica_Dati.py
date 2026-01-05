@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import boto3
 import json
+import io
 from botocore.exceptions import NoCredentialsError
 
 st.set_page_config(page_title="Carica Dati", layout="centered")
 
 st.title("☁️ Caricamento Dati su Cloud")
 
-# --- 1. RECUPERO CREDENZIALI ---
+# --- 1. RECUPERO CREDENZIALI (ROBUSTO) ---
 try:
     if "digitalocean" in st.secrets:
         secrets = st.secrets["digitalocean"]
@@ -28,69 +29,73 @@ except Exception as e:
     st.error(f"❌ Errore Secrets: {e}")
     st.stop()
 
+# --- 2. CONNESSIONE BOTO3 ---
 def get_s3_client():
     session = boto3.session.Session()
-    return session.client('s3', region_name=DO_REGION, endpoint_url=DO_ENDPOINT,
-                          aws_access_key_id=DO_ACCESS_KEY, aws_secret_access_key=DO_SECRET_KEY)
+    return session.client('s3',
+                          region_name=DO_REGION,
+                          endpoint_url=DO_ENDPOINT,
+                          aws_access_key_id=DO_ACCESS_KEY,
+                          aws_secret_access_key=DO_SECRET_KEY)
 
-# --- 2. INTERFACCIA DI SELEZIONE (PRIMA DEL FILE) ---
+# --- 3. INTERFACCIA DI SELEZIONE (PRIMA DEL FILE) ---
 st.subheader("1. Impostazioni Destinazione")
 
-col1, col2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 
-with col1:
-    # Scelta Cartella Macro
-    folder_type = st.radio("Tipo di Caricamento:", ["Forecast", "History_Baseline"], index=0)
+with c1:
+    # Tipo di dato
+    folder_type = st.radio("Tipo Cartella:", ["Forecast", "History_Baseline"])
 
-with col2:
-    # Scelta Struttura
+with c2:
+    # Selezione Struttura
     structure_map = {
         "Lavagnini My Place": "Lavagnini", 
         "La Terrazza di Jenny": "La_Terrazza", 
         "B&B Pitti Palace": "Pitti_Palace"
     }
-    selected_label = st.selectbox("Seleziona Struttura:", list(structure_map.keys()))
+    selected_label = st.selectbox("Struttura:", list(structure_map.keys()))
     folder_struct = structure_map[selected_label]
+
+with c3:
+    # Selezione Anno (MANUALE come richiesto)
+    selected_year = st.number_input("Anno:", min_value=2023, max_value=2030, value=2026)
 
 st.divider()
 
-# --- 3. UPLOAD FILE ---
-st.subheader("2. Seleziona File Excel")
-uploaded_file = st.file_uploader("Trascina qui il file forecast (es. Forecast_Lavagnini_08022026.xlsx)", type=["xlsx", "xls"])
+# --- 4. UPLOAD FILE ---
+st.subheader("2. Caricamento File")
+uploaded_file = st.file_uploader("Seleziona il file Excel", type=["xlsx", "xls"])
 
 if uploaded_file:
-    # Logica Anno Automatica (dal nome file)
-    current_year = 2026 # Default
-    if "2025" in uploaded_file.name: current_year = 2025
-    if "2024" in uploaded_file.name: current_year = 2024
-    if "2023" in uploaded_file.name: current_year = 2023
-
-    st.info(f"📅 Anno rilevato dal file: **{current_year}**")
+    st.write(f"📄 File pronto per l'upload: **{uploaded_file.name}**")
     
-    # Percorso finale
-    target_path = f"{folder_type}/{folder_struct}/{current_year}/{uploaded_file.name}"
+    # Percorso finale costruito con le selezioni fatte sopra
+    target_path = f"{folder_type}/{folder_struct}/{selected_year}/{uploaded_file.name}"
     
-    if st.button("🚀 Conferma e Carica"):
+    if st.button("🚀 Conferma e Carica su Cloud"):
         s3 = get_s3_client()
-        index_path = f"{folder_type}/{folder_struct}/{current_year}/index.json"
+        index_path = f"{folder_type}/{folder_struct}/{selected_year}/index.json"
         
         with st.spinner("Caricamento in corso..."):
             try:
-                # A. Upload File
+                # A. Upload File Fisico
                 s3.upload_fileobj(uploaded_file, DO_BUCKET, target_path, ExtraArgs={'ACL': 'public-read'})
-                st.success(f"✅ File caricato correttamente in: {target_path}")
+                st.success(f"✅ Caricato correttamente: {target_path}")
                 
-                # B. Aggiornamento Indice
+                # B. Aggiornamento Indice JSON
                 file_list = []
                 try:
                     obj = s3.get_object(Bucket=DO_BUCKET, Key=index_path)
-                    file_list = json.loads(obj['Body'].read().decode('utf-8'))
+                    content = obj['Body'].read().decode('utf-8')
+                    file_list = json.loads(content)
                 except:
-                    pass
+                    file_list = [] # Se non esiste, crea lista vuota
                 
                 if uploaded_file.name not in file_list:
                     file_list.append(uploaded_file.name)
-                    file_list.sort(reverse=True) # Ordine decrescente
+                    # Ordina per avere i file più recenti in alto (se hanno data nel nome)
+                    file_list.sort(reverse=True)
                     
                     s3.put_object(
                         Bucket=DO_BUCKET,
@@ -102,4 +107,4 @@ if uploaded_file:
                     st.info("🔄 Indice Cloud aggiornato.")
                     
             except Exception as e:
-                st.error(f"Errore Upload: {e}")
+                st.error(f"Errore tecnico durante l'upload: {str(e)}")
