@@ -6,3 +6,4 @@ plotly
 watchdog
 altair
 matplotlib
+boto3
