@@ -1,0 +1,312 @@
+import streamlit as st
+import pandas as pd
+import requests
+import io
+import time
+import logging
+from typing import Tuple, Dict, Optional, List
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Costante per l'URL base
+BASE_URL = "https://ihosp-kross-archive.sfo3.cdn.digitaloceanspaces.com"
+
+
+def _normalize_number(value) -> Optional[float]:
+    """
+    Normalizza numeri in formato italiano (virgola decimale, punto migliaia).
+    Gestisce anche percentuali e valori già numerici.
+    """
+    if pd.isna(value):
+        return None
+    
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    if isinstance(value, str):
+        value = value.strip()
+        
+        # Rimuovi simbolo percentuale se presente
+        if '%' in value:
+            value = value.replace('%', '').strip()
+        
+        # Rimuovi punto (separatore migliaia) e sostituisci virgola (decimale) con punto
+        value = value.replace('.', '').replace(',', '.')
+        
+        try:
+            return float(value)
+        except ValueError:
+            logger.warning(f"Impossibile convertire '{value}' in numero")
+            return None
+    
+    return None
+
+
+def _parse_excel_file(excel_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Legge un file Excel e applica la mappatura delle colonne standardizzata.
+    """
+    try:
+        # Leggi il file Excel
+        df = pd.read_excel(io.BytesIO(excel_bytes), engine='openpyxl')
+        
+        # Mappatura colonne italiane -> nomi interni
+        column_mapping = {
+            'Data': 'date',
+            'data': 'date',
+            'Totale revenue': 'revenue',
+            'Totale Revenue': 'revenue',
+            'Revenue': 'revenue',
+            'Occupate': 'rooms_sold',
+            'Occupate %': 'occupancy_pct',
+            'Occupancy %': 'occupancy_pct',
+            'ADR': 'adr',
+            'RevPar': 'revpar',
+            'RevPAR': 'revpar',
+            'Unità': 'rooms',
+            'Unita': 'rooms',
+            'Bloccate': 'blocked'
+        }
+        
+        # Applica la mappatura
+        df = df.rename(columns=column_mapping)
+        
+        # Verifica colonne essenziali
+        required_columns = ['date', 'revenue', 'rooms_sold', 'occupancy_pct', 'adr', 'revpar']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            available_cols = list(df.columns)
+            logger.error(f"Colonne mancanti in {filename}: {missing_columns}")
+            logger.error(f"Colonne disponibili: {available_cols}")
+            raise ValueError(f"Colonne obbligatorie mancanti: {missing_columns}")
+        
+        # Seleziona colonne disponibili (obbligatorie + opzionali)
+        columns_to_keep = ['date', 'revenue', 'rooms_sold', 'occupancy_pct', 'adr', 'revpar']
+        if 'rooms' in df.columns:
+            columns_to_keep.append('rooms')
+        if 'blocked' in df.columns:
+            columns_to_keep.append('blocked')
+        
+        df = df[columns_to_keep].copy()
+        
+        # Rimuovi righe con date vuote o testuali (totali)
+        df = df[df['date'].notna()]
+        df = df[~df['date'].astype(str).str.contains('Totale|totale|TOTALE|Total', na=False, case=False)]
+        
+        # Converti la colonna date
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.dropna(subset=['date'])
+        
+        # Normalizza tutte le colonne numeriche
+        df['revenue'] = df['revenue'].apply(_normalize_number)
+        df['rooms_sold'] = df['rooms_sold'].apply(_normalize_number)
+        df['occupancy_pct'] = df['occupancy_pct'].apply(_normalize_number)
+        df['adr'] = df['adr'].apply(_normalize_number)
+        df['revpar'] = df['revpar'].apply(_normalize_number)
+        
+        if 'rooms' in df.columns:
+            df['rooms'] = df['rooms'].apply(_normalize_number)
+            df['rooms'] = df['rooms'].fillna(0).astype(int)
+        
+        if 'blocked' in df.columns:
+            df['blocked'] = df['blocked'].apply(_normalize_number)
+            df['blocked'] = df['blocked'].fillna(0).astype(int)
+        
+        # Converti rooms_sold in int
+        df['rooms_sold'] = df['rooms_sold'].fillna(0).astype(int)
+        
+        # Gestisci formato percentuale: se > 1 è in formato 85.5 invece di 0.855
+        if df['occupancy_pct'].notna().any() and df['occupancy_pct'].max() > 1:
+            df['occupancy_pct'] = df['occupancy_pct'] / 100
+        
+        # Rimuovi righe completamente vuote
+        df = df.dropna(how='all', subset=['revenue', 'rooms_sold', 'adr'])
+        
+        # Ordina per data
+        df = df.sort_values('date').reset_index(drop=True)
+        
+        logger.info(f"✓ Parsed {filename}: {len(df)} righe valide")
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"✗ Errore nel parsing di {filename}: {str(e)}")
+        raise
+
+
+def _download_file(url: str, description: str) -> Optional[bytes]:
+    """
+    Scarica un file da URL con gestione errori.
+    """
+    try:
+        logger.info(f"Downloading {description}...")
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        logger.info(f"✓ Downloaded {description} ({len(response.content)} bytes)")
+        return response.content
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            logger.warning(f"✗ File non trovato: {description}")
+        else:
+            logger.error(f"✗ Errore HTTP nel download di {description}: {e}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"✗ Errore di connessione nel download di {description}: {str(e)}")
+        return None
+
+
+def _merge_forecast_into_baseline(baseline: pd.DataFrame, forecast: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge con logica 'Override-by-date': il forecast sovrascrive la baseline
+    per le date coincidenti (Last Wins).
+    """
+    # Identifica le date presenti nel forecast
+    forecast_dates = set(forecast['date'])
+    
+    # Rimuovi dalla baseline le date che saranno sovrascritte
+    baseline_filtered = baseline[~baseline['date'].isin(forecast_dates)].copy()
+    
+    # Concatena baseline filtrata + forecast
+    merged = pd.concat([baseline_filtered, forecast], ignore_index=True)
+    
+    # Ordina per data
+    merged = merged.sort_values('date').reset_index(drop=True)
+    
+    return merged
+
+
+@st.cache_data(ttl=3600)
+def load_data(structure_name: str, year: int) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Carica e unisce i dati della Baseline con i Forecast giornalieri.
+    
+    Args:
+        structure_name: Nome della struttura (es: "HOTEL_EXAMPLE")
+        year: Anno da caricare (es: 2024)
+    
+    Returns:
+        Tuple[pd.DataFrame, Dict]: 
+            - DataFrame unificato con tutti i dati
+            - Dict con metadati (num_forecasts, baseline_rows, final_rows, files_applied)
+    """
+    metadata = {
+        'structure': structure_name,
+        'year': year,
+        'baseline_rows': 0,
+        'num_forecasts': 0,
+        'files_applied': [],
+        'final_rows': 0,
+        'load_time': time.time()
+    }
+    
+    logger.info(f"=== Inizio caricamento dati per {structure_name} / {year} ===")
+    
+    # STEP 1: Carica Baseline
+    baseline_url = f"{BASE_URL}/History_Baseline/baseline_{year}_{structure_name}.xlsx"
+    baseline_bytes = _download_file(baseline_url, f"Baseline {year}")
+    
+    if baseline_bytes is None:
+        raise FileNotFoundError(
+            f"Impossibile scaricare la baseline per {structure_name} ({year}). "
+            f"Verifica che il file esista: {baseline_url}"
+        )
+    
+    baseline_df = _parse_excel_file(baseline_bytes, f"baseline_{year}_{structure_name}.xlsx")
+    metadata['baseline_rows'] = len(baseline_df)
+    logger.info(f"Baseline caricata: {len(baseline_df)} righe")
+    
+    # STEP 2: Carica l'indice dei Forecast (con cache busting)
+    timestamp = int(time.time())
+    index_url = f"{BASE_URL}/Forecast/{structure_name}/{year}/index.json?ts={timestamp}"
+    
+    try:
+        logger.info("Downloading forecast index...")
+        index_response = requests.get(index_url, timeout=30)
+        
+        if index_response.status_code == 404:
+            logger.warning("✗ index.json non trovato. Uso solo baseline.")
+            metadata['final_rows'] = len(baseline_df)
+            return baseline_df, metadata
+        
+        index_response.raise_for_status()
+        forecast_files = index_response.json()
+        
+        if not forecast_files or not isinstance(forecast_files, list) or len(forecast_files) == 0:
+            logger.warning("✗ Nessun forecast disponibile. Uso solo baseline.")
+            metadata['final_rows'] = len(baseline_df)
+            return baseline_df, metadata
+        
+        logger.info(f"✓ Trovati {len(forecast_files)} file forecast")
+        
+    except Exception as e:
+        logger.error(f"✗ Errore nel caricamento di index.json: {str(e)}")
+        metadata['final_rows'] = len(baseline_df)
+        return baseline_df, metadata
+    
+    # STEP 3: Applica i Forecast in ordine cronologico (dal più vecchio al più recente)
+    merged_df = baseline_df.copy()
+    
+    for i, forecast_file in enumerate(forecast_files, 1):
+        forecast_url = f"{BASE_URL}/Forecast/{structure_name}/{year}/{forecast_file}"
+        forecast_bytes = _download_file(forecast_url, f"Forecast {i}/{len(forecast_files)}: {forecast_file}")
+        
+        if forecast_bytes is None:
+            logger.warning(f"⊘ Salto forecast {forecast_file} (download fallito)")
+            continue
+        
+        try:
+            forecast_df = _parse_excel_file(forecast_bytes, forecast_file)
+            
+            # Applica la logica di merge (override-by-date)
+            merged_df = _merge_forecast_into_baseline(merged_df, forecast_df)
+            
+            metadata['num_forecasts'] += 1
+            metadata['files_applied'].append(forecast_file)
+            
+            logger.info(f"✓ Applicato {forecast_file} → Totale righe: {len(merged_df)}")
+            
+        except Exception as e:
+            logger.error(f"✗ Errore nell'applicazione di {forecast_file}: {str(e)}")
+            continue
+    
+    metadata['final_rows'] = len(merged_df)
+    metadata['load_time'] = time.time() - metadata['load_time']
+    
+    logger.info(f"=== Caricamento completato ===")
+    logger.info(f"Baseline: {metadata['baseline_rows']} righe")
+    logger.info(f"Forecast applicati: {metadata['num_forecasts']}/{len(forecast_files)}")
+    logger.info(f"Righe finali: {metadata['final_rows']}")
+    logger.info(f"Tempo di caricamento: {metadata['load_time']:.2f}s")
+    
+    return merged_df, metadata
+
+
+def get_date_range(df: pd.DataFrame) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    Restituisce il range di date disponibili nel DataFrame.
+    """
+    if df.empty:
+        return None, None
+    return df['date'].min(), df['date'].max()
+
+
+def get_metrics_summary(df: pd.DataFrame) -> Dict:
+    """
+    Calcola metriche aggregate sul DataFrame.
+    """
+    if df.empty:
+        return {}
+    
+    return {
+        'total_revenue': df['revenue'].sum(),
+        'total_rooms_sold': df['rooms_sold'].sum(),
+        'avg_occupancy': df['occupancy_pct'].mean(),
+        'avg_adr': df['adr'].mean(),
+        'avg_revpar': df['revpar'].mean(),
+        'date_from': df['date'].min(),
+        'date_to': df['date'].max(),
+        'days_count': len(df)
+    }
