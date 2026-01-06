@@ -3,6 +3,8 @@ import pandas as pd
 import datetime
 from services import forecast_manager
 
+st.write(f"Percorso attivo: {__file__}")
+
 # --- CONFIGURAZIONE PAGINA: SIDEBAR CHIUSA DI DEFAULT ---
 st.set_page_config(
     page_title="Dashboard Overview", 
