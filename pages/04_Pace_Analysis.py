@@ -97,11 +97,15 @@ def style_delta(val):
     color = 'green' if val >= 0 else 'red'
     return f'color: {color}; font-weight: bold;'
 
+# Calcoliamo l'altezza dinamica (35px per riga + testata)
+height_table = (len(monthly_pace) + 1) * 35 + 3
+
 st.dataframe(
     monthly_pace[['Mese', 'revenue_curr', 'revenue_ly', 'Delta Rev', 'Delta %']].style
     .format({'revenue_curr': '€ {:,.0f}', 'revenue_ly': '€ {:,.0f}', 'Delta Rev': '€ {:+,.0f}', 'Delta %': '{:+.1f}%'})
     .map(style_delta, subset=['Delta Rev', 'Delta %']),
-    use_container_width=True
+    use_container_width=True,
+    height=height_table  # <--- AGGIUNTO QUESTO PER BLOCCARE L'ALTEZZA
 )
 
 st.info("""
