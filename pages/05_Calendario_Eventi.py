@@ -197,7 +197,17 @@ def highlight_event_rows(row):
 
 df_display = df_month.copy()
 df_display['Giorno'] = df_display['date'].dt.strftime('%d/%m (%a)')
-df_display['Rilevanza'] = df_display['importanza'].apply(lambda x: "⭐" * int(x))
+# --- FIX RILEVANZA (Gestione sicura di NaN e decimali) ---
+def safe_stars(val):
+    try:
+        # Trasforma prima in float per gestire i decimali, poi in int
+        if pd.isna(val): return ""
+        n = int(float(val))
+        return "⭐" * n
+    except:
+        return ""
+
+df_display['Rilevanza'] = df_display['importanza'].apply(safe_stars)
 
 final_cols = ['Giorno', 'occupancy_pct', 'adr', 'revenue', 'evento', 'tipo', 'Rilevanza']
 h_table = (len(df_display) + 1) * 35 + 10
