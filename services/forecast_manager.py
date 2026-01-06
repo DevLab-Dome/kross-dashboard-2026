@@ -203,3 +203,70 @@ def get_pickup_data(structure_label, year, file_recent, file_old):
         df_merge['pickup_occ'] = 0.0
     
     return df_merge
+
+# ==============================================================================
+# FUNZIONI PER PACE ANALYSIS (STESSO GIORNO ANNO SCORSO)
+# ==============================================================================
+
+def get_pace_data(structure_label, target_year):
+    """
+    Recupera l'ultimo snapshot disponibile per l'anno target e 
+    tenta di recuperare lo snapshot 'gemello' di 52 settimane fa.
+    """
+    df_snaps = get_available_snapshots(structure_label, target_year)
+    if df_snaps.empty or len(df_snaps) < 1:
+        return pd.DataFrame(), None, None
+
+    # 1. Snapshot RECENTE (Oggi)
+    latest_snap = df_snaps.iloc[0]
+    date_recent = latest_snap['date']
+    file_recent = latest_snap['filename']
+    
+    # 2. Snapshot STORICO (Target: -52 settimane / 364 giorni)
+    # Usiamo 364 perché è divisibile per 7 (stesso giorno della settimana)
+    target_past_date = date_recent - datetime.timedelta(days=364)
+    
+    # Cerchiamo il file che si avvicina di più a quella data
+    df_snaps['diff'] = (df_snaps['date'] - target_past_date).abs()
+    past_candidates = df_snaps.sort_values('diff')
+    
+    # Se il file più vicino ha più di 10 giorni di scarto dalla data target, 
+    # probabilmente non abbiamo lo snapshot "gemello" e useremo il consuntivo (se disponibile)
+    snap_past = past_candidates.iloc[0]
+    
+    if snap_past['diff'].days > 10:
+        # Qui potremmo implementare il caricamento del consuntivo finale se necessario
+        # Per ora carichiamo comunque il file più vecchio disponibile
+        file_old = df_snaps.iloc[-1]['filename']
+        date_old = df_snaps.iloc[-1]['date']
+        is_exact_pace = False
+    else:
+        file_old = snap_past['filename']
+        date_old = snap_past['date']
+        is_exact_pace = True
+
+    # Caricamento dati
+    df_curr = load_excel_from_url(f"{BASE_URL}/{'Forecast' if target_year == CURRENT_SYSTEM_YEAR else 'History_Baseline'}/{STRUCTURE_MAP[structure_label]}/{target_year}/{file_recent}")
+    df_prev = load_excel_from_url(f"{BASE_URL}/{'Forecast' if target_year == CURRENT_SYSTEM_YEAR else 'History_Baseline'}/{STRUCTURE_MAP[structure_label]}/{target_year}/{file_old}")
+
+    if df_curr.empty: return pd.DataFrame(), None, None
+
+    # Prepariamo il merge
+    df_curr = df_curr[['date', 'revenue', 'rooms_sold', 'adr', 'occupancy_pct']]
+    
+    if not df_prev.empty:
+        df_prev = df_prev[['date', 'revenue', 'rooms_sold', 'adr', 'occupancy_pct']]
+        df_pace = pd.merge(df_curr, df_prev, on='date', how='left', suffixes=('_curr', '_ly'))
+    else:
+        # Se non c'è lo storico, creiamo colonne vuote per non rompere il grafico
+        df_pace = df_curr.copy()
+        for col in ['revenue_ly', 'rooms_sold_ly', 'adr_ly', 'occupancy_pct_ly']:
+            df_pace[col] = 0.0
+
+    meta = {
+        'date_recent': date_recent,
+        'date_old': date_old,
+        'is_exact_pace': is_exact_pace
+    }
+
+    return df_pace, meta, df_curr
