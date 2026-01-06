@@ -1,213 +1,191 @@
 import streamlit as st
 import pandas as pd
-import datetime
-import altair as alt
-from services import forecast_manager
+import boto3
+import io
+import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Confronto Pickup", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Confronto Pickup", layout="wide")
 
-# --- CSS STILE ---
-st.markdown("""
-<style>
-    .centered-header { text-align: center; font-weight: bold; }
-    /* Stile per le metriche */
-    div[data-testid="stMetric"] { 
-        background-color: transparent; 
-        border: 1px solid #e6e6e6; 
-        padding: 15px; 
-        border-radius: 10px;
-        text-align: center;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    /* Miglioramento visuale delle Pills */
-    div[data-testid="stPills"] {
-        justify-content: center;
-    }
-</style>
-""", unsafe_allow_html=True)
+# --- 1. SETUP E CREDENZIALI ---
+try:
+    if "digitalocean" in st.secrets:
+        secrets = st.secrets["digitalocean"]
+    else:
+        secrets = st.secrets
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.title("🔧 Filtri Pickup")
-    strutture_options = ["Lavagnini My Place", "La Terrazza di Jenny", "B&B Pitti Palace"]
-    if 'selected_struct' not in st.session_state: st.session_state.selected_struct = strutture_options[0]
-    selected_struct = st.selectbox("Struttura", strutture_options, key='struct_pickup')
-    if 'selected_year' not in st.session_state: st.session_state.selected_year = datetime.datetime.now().year
-    selected_year = st.sidebar.number_input("Anno", min_value=2024, max_value=2030, value=st.session_state.selected_year)
-    st.divider()
-
-st.title(f"🚀 Analisi Pickup: {selected_struct} {selected_year}")
-
-# --- 1. CARICAMENTO LISTA FILE ---
-df_snaps = forecast_manager.get_available_snapshots(selected_struct, selected_year)
-
-if df_snaps.empty:
-    st.warning(f"⚠️ Nessuno storico trovato. Assicurati che i file su Cloud abbiano la data nel nome (es. 08022025).")
+    DO_ACCESS_KEY = secrets.get("access_key")
+    DO_SECRET_KEY = secrets.get("secret_key")
+    DO_REGION = secrets.get("region", "sfo3")
+    DO_ENDPOINT = secrets.get("endpoint", "https://sfo3.digitaloceanspaces.com")
+    DO_BUCKET = secrets.get("bucket_name", "ihosp-kross-archive")
+except:
+    st.error("❌ Credenziali mancanti.")
     st.stop()
 
-# --- 2. GESTIONE SELEZIONE (PILLS + MANUALE) ---
-latest_snap = df_snaps.iloc[0]
-latest_date = latest_snap['date']
-file_recent = latest_snap['filename']
+def get_s3_client():
+    session = boto3.session.Session()
+    return session.client('s3', region_name=DO_REGION, endpoint_url=DO_ENDPOINT,
+                          aws_access_key_id=DO_ACCESS_KEY, aws_secret_access_key=DO_SECRET_KEY)
 
-col_preset, col_manual = st.columns([2, 3])
+def load_data_from_s3(bucket, key):
+    s3 = get_s3_client()
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return pd.read_excel(io.BytesIO(obj['Body'].read()))
 
-with col_preset:
-    st.write("**Periodo di Analisi:**")
-    period_map = {"1 Giorno": 1, "3 Giorni": 3, "7 Giorni": 7, "30 Giorni": 30}
-    
-    selected_period = st.pills(
-        "Seleziona intervallo",
-        options=list(period_map.keys()),
-        default="1 Giorno",
-        selection_mode="single",
-        label_visibility="collapsed"
-    )
-    
-    days_back = period_map[selected_period]
+# --- 2. INTERFACCIA SELEZIONE ---
+st.title("📈 Analisi Pickup & Variazioni")
+st.markdown("Confronta due forecast per vedere **dove** e **come** sono cambiate le prenotazioni.")
 
-target_date = latest_date - datetime.timedelta(days=days_back)
-past_candidates = df_snaps[df_snaps['date'] <= target_date]
+# Sidebar per filtri globali
+st.sidebar.header("Filtri")
+structure_map = {
+    "Lavagnini My Place": "Lavagnini", 
+    "La Terrazza di Jenny": "La_Terrazza", 
+    "B&B Pitti Palace": "Pitti_Palace"
+}
+selected_label = st.sidebar.selectbox("Struttura", list(structure_map.keys()))
+folder_struct = structure_map[selected_label]
+selected_year = st.sidebar.number_input("Anno", min_value=2023, max_value=2030, value=2026)
 
-if not past_candidates.empty:
-    file_old_auto = past_candidates.iloc[0]['filename']
-else:
-    file_old_auto = df_snaps.iloc[-1]['filename']
+# Recupero lista file
+s3 = get_s3_client()
+prefix = f"Forecast/{folder_struct}/{selected_year}/"
+files = []
+try:
+    response = s3.list_objects_v2(Bucket=DO_BUCKET, Prefix=prefix)
+    if 'Contents' in response:
+        # Ordina per data (dal più recente)
+        sorted_files = sorted(response['Contents'], key=lambda x: x['LastModified'], reverse=True)
+        files = [obj['Key'].split('/')[-1] for obj in sorted_files if obj['Key'].endswith('.xlsx')]
+except:
+    pass
 
-with col_manual:
-    st.write(f"**Dettaglio File:** (Auto: -{days_back}gg)")
-    c_rec, c_old = st.columns(2)
-    
-    file_map = dict(zip(df_snaps['filename'], df_snaps['label']))
-    idx_old_auto = df_snaps[df_snaps['filename'] == file_old_auto].index[0]
-    
-    sel_rec = c_rec.selectbox("Oggi", df_snaps['filename'], format_func=lambda x: file_map[x], index=0)
-    sel_old = c_old.selectbox("Passato", df_snaps['filename'], format_func=lambda x: file_map[x], index=int(idx_old_auto))
-
-if sel_rec == sel_old:
-    st.warning("Stai confrontando lo stesso file. Il Pickup sarà zero.")
+if len(files) < 2:
+    st.warning("⚠️ Servono almeno 2 file forecast caricati per fare un confronto.")
     st.stop()
 
-# --- 3. CALCOLO DATI ---
-with st.spinner(f"Calcolo Pickup..."):
-    df_pickup = forecast_manager.get_pickup_data(selected_struct, selected_year, sel_rec, sel_old)
+# Selezione File A e B
+col1, col2 = st.columns(2)
+with col1:
+    file_a = st.selectbox("Forecast A (Più Recente)", files, index=0)
+with col2:
+    file_b = st.selectbox("Forecast B (Precedente)", files, index=1 if len(files) > 1 else 0)
 
-if df_pickup.empty:
-    st.error("Errore dati.")
-    st.stop()
+if st.button("🚀 Avvia Confronto", use_container_width=True):
+    with st.spinner("Analisi differenziale in corso..."):
+        # Caricamento
+        path_a = f"{prefix}{file_a}"
+        path_b = f"{prefix}{file_b}"
+        
+        try:
+            df_a = load_data_from_s3(DO_BUCKET, path_a)
+            df_b = load_data_from_s3(DO_BUCKET, path_b)
+            
+            # Standardizzazione Colonne (Gestisce varianti di nomi)
+            def standardize(df):
+                df.columns = [c.strip().lower() for c in df.columns]
+                # Mappatura colonne essenziali
+                rename_map = {
+                    'data': 'Date', 'date': 'Date',
+                    'revenue': 'Revenue', 'produzione': 'Revenue',
+                    'camere': 'Rooms', 'rooms': 'Rooms', 'notti': 'Rooms'
+                }
+                df = df.rename(columns=rename_map)
+                # Assicurarsi che Date sia datetime
+                df['Date'] = pd.to_datetime(df['Date'])
+                return df[['Date', 'Revenue', 'Rooms']].groupby('Date').sum().reset_index()
 
-# --- 4. LIVELLO 1: KPI ANNUALI ---
-st.subheader("1️⃣ Variazioni Totali (Intero Anno)")
+            df_a_clean = standardize(df_a)
+            df_b_clean = standardize(df_b)
 
-tot_rev_pickup = df_pickup['pickup_revenue'].sum()
-tot_rooms_pickup = df_pickup['pickup_rooms'].sum()
+            # --- MERGE DEI DATI ---
+            # Uniamo i due dataframe sulla data
+            merged = pd.merge(df_a_clean, df_b_clean, on='Date', how='outer', suffixes=('_A', '_B')).fillna(0)
 
-tot_rev_curr = df_pickup['revenue_curr'].sum()
-tot_rooms_curr = df_pickup['rooms_sold_curr'].sum()
-global_adr_curr = tot_rev_curr / tot_rooms_curr if tot_rooms_curr > 0 else 0
+            # Calcolo Delta
+            merged['Delta_Rev'] = merged['Revenue_A'] - merged['Revenue_B']
+            merged['Delta_Rooms'] = merged['Rooms_A'] - merged['Rooms_B']
+            
+            # Calcolo Totali Macro
+            tot_pickup_rev = merged['Delta_Rev'].sum()
+            tot_pickup_rooms = merged['Delta_Rooms'].sum()
 
-tot_rev_prev = df_pickup['revenue_prev'].sum()
-tot_rooms_prev = df_pickup['rooms_sold_prev'].sum()
-global_adr_prev = tot_rev_prev / tot_rooms_prev if tot_rooms_prev > 0 else 0
+            # --- 3. KPI MACRO ---
+            st.divider()
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Totale Pickup Revenue", f"€ {tot_pickup_rev:,.0f}", delta_color="normal")
+            k2.metric("Totale Pickup Camere", f"{tot_pickup_rooms:.0f}", delta_color="normal")
+            
+            # Logica colore ADR: Se positivo verde, se negativo rosso
+            k3.info("💡 I Delta sono calcolati come: (File A - File B)")
 
-delta_adr_global = global_adr_curr - global_adr_prev
+            # --- 4. TOP & FLOP (NUOVA SEZIONE) ---
+            st.subheader("🏆 Top & Flop Dates")
+            st.markdown("Le giornate che hanno subito le variazioni più drastiche.")
+            
+            tf1, tf2 = st.columns(2)
+            
+            with tf1:
+                st.markdown("### 🟢 Top 3 Guadagni")
+                # Prende i 3 valori più alti di Delta Revenue
+                top_gainers = merged.nlargest(3, 'Delta_Rev')
+                for _, row in top_gainers.iterrows():
+                    if row['Delta_Rev'] > 0:
+                        st.success(f"**{row['Date'].strftime('%d/%m/%Y')}**: +€ {row['Delta_Rev']:,.0f} ({row['Delta_Rooms']:.0f} camere)")
+                    else:
+                        st.write("Nessun guadagno rilevante.")
 
-tot_capacity = df_pickup['rooms_curr'].sum() if 'rooms_curr' in df_pickup.columns else 1 
-global_revpar_curr = tot_rev_curr / tot_capacity
-global_revpar_prev = tot_rev_prev / tot_capacity
-delta_revpar_global = global_revpar_curr - global_revpar_prev
+            with tf2:
+                st.markdown("### 🔴 Top 3 Perdite")
+                # Prende i 3 valori più bassi (negativi)
+                top_losers = merged.nsmallest(3, 'Delta_Rev')
+                for _, row in top_losers.iterrows():
+                    if row['Delta_Rev'] < 0:
+                        st.error(f"**{row['Date'].strftime('%d/%m/%Y')}**: -€ {abs(row['Delta_Rev']):,.0f} ({row['Delta_Rooms']:.0f} camere)")
+                    else:
+                        st.write("Nessuna perdita rilevante.")
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Pickup Revenue", f"€ {tot_rev_pickup:+,.0f}")
-k2.metric("Pickup Notti", f"{tot_rooms_pickup:+,.0f}")
-k3.metric("Var. ADR Globale", f"€ {delta_adr_global:+.2f}")
-k4.metric("Var. RevPAR", f"€ {delta_revpar_global:+.2f}")
+            # --- 5. HEATMAP PICKUP (NUOVA SEZIONE) ---
+            st.divider()
+            st.subheader("🔥 Heatmap Temporale del Pickup")
+            st.markdown("Visualizza l'andamento delle variazioni nel tempo. **Verde** = Crescita, **Rosso** = Calo.")
 
-st.divider()
+            # Grafico a barre colorato in base al Delta Revenue
+            # Usiamo una scala di colori divergente (Rosso -> Bianco -> Verde)
+            fig_heat = px.bar(
+                merged, 
+                x='Date', 
+                y='Delta_Rev',
+                color='Delta_Rev',
+                title="Variazione Netta Revenue per Giorno",
+                color_continuous_scale=['#FF4B4B', '#FFFFFF', '#00C853'], # Rosso Streamlit, Bianco, Verde brillante
+                range_color=[-1000, 1000], # Range fisso per normalizzare i colori (aggiustabile)
+                labels={'Delta_Rev': 'Pickup Revenue (€)', 'Date': 'Data'}
+            )
+            
+            # Pulizia grafica
+            fig_heat.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis_title="",
+                yaxis_title="Variazione €",
+                height=400
+            )
+            # Aggiunge una linea dello zero per riferimento
+            fig_heat.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
 
-# --- 5. LIVELLO 2: GRIGLIA MENSILE ---
-st.subheader("2️⃣ Dettaglio Mensile")
+            st.plotly_chart(fig_heat, use_container_width=True)
 
-df_pickup['MeseNum'] = df_pickup['date'].dt.month
-df_pickup['Mese'] = df_pickup['date'].dt.strftime('%B')
+            # --- 6. TABELLA DETTAGLIO ---
+            with st.expander("🔎 Vedi Dati Dettagliati (Tabella)"):
+                # Formattazione per lettura umana
+                display_df = merged[['Date', 'Revenue_A', 'Revenue_B', 'Delta_Rev', 'Rooms_A', 'Rooms_B', 'Delta_Rooms']].copy()
+                display_df['Date'] = display_df['Date'].dt.date
+                st.dataframe(display_df.style.format({
+                    'Revenue_A': '€ {:.0f}', 'Revenue_B': '€ {:.0f}', 'Delta_Rev': '€ {:.0f}',
+                    'Rooms_A': '{:.1f}', 'Rooms_B': '{:.1f}', 'Delta_Rooms': '{:.1f}'
+                }), use_container_width=True)
 
-monthly = df_pickup.groupby(['MeseNum', 'Mese']).agg({
-    'revenue_curr': 'sum',
-    'revenue_prev': 'sum',
-    'rooms_sold_curr': 'sum',
-    'rooms_sold_prev': 'sum',
-    'pickup_revenue': 'sum', 
-    'pickup_rooms': 'sum'    
-}).reset_index().sort_values('MeseNum')
-
-monthly['adr_curr'] = monthly['revenue_curr'] / monthly['rooms_sold_curr']
-monthly['adr_prev'] = monthly['revenue_prev'] / monthly['rooms_sold_prev']
-monthly['delta_adr'] = monthly['adr_curr'] - monthly['adr_prev']
-monthly['delta_adr'] = monthly['delta_adr'].fillna(0) 
-
-def color_delta(val):
-    if val == 0: return 'color: inherit; opacity: 0.4'
-    color = '#28a745' if val > 0 else '#dc3545'
-    return f'color: {color}; font-weight: bold;'
-
-st.dataframe(
-    monthly[['Mese', 'pickup_revenue', 'pickup_rooms', 'delta_adr', 'revenue_curr']].style
-    .map(color_delta, subset=['pickup_revenue', 'pickup_rooms', 'delta_adr'])
-    .format({
-        'pickup_revenue': '€ {:+,.0f}',
-        'pickup_rooms': '{:+,.0f}',
-        'delta_adr': '€ {:+.2f}',
-        'revenue_curr': '€ {:,.0f}'
-    }),
-    use_container_width=True,
-    column_config={
-        "pickup_revenue": "Var. Revenue",
-        "pickup_rooms": "Var. Notti",
-        "delta_adr": "Var. ADR",
-        "revenue_curr": "Totale Attuale"
-    },
-    height=(len(monthly) + 1) * 35 + 3
-)
-
-st.divider()
-
-# --- 6. LIVELLO 3: DETTAGLIO GIORNALIERO ---
-st.subheader("3️⃣ Dettaglio Giornaliero (Solo Variazioni)")
-
-daily_movers = df_pickup[
-    (df_pickup['pickup_revenue'].abs() > 0) | (df_pickup['pickup_rooms'].abs() > 0)
-].copy()
-
-if daily_movers.empty:
-    st.info("Nessuna variazione giornaliera rilevata nel periodo selezionato.")
-else:
-    daily_movers['date_str'] = daily_movers['date'].dt.strftime('%d/%m %a')
-    daily_movers = daily_movers.set_index('date_str')
-    
-    # CALCOLO ALTEZZA DINAMICA
-    # +1 per l'intestazione, * 35 pixel per riga, + 3 pixel margine
-    dynamic_height = (len(daily_movers) + 1) * 35 + 3
-    # Mettiamo un tetto massimo se vuoi evitare pagine infinite (es. max 800px), 
-    # altrimenti lascia pure dynamic_height puro.
-    # Qui uso dynamic_height puro così si vede TUTTO senza scroll interno.
-    
-    st.dataframe(
-        daily_movers[['pickup_revenue', 'pickup_rooms', 'pickup_adr', 'revenue_curr']].style
-        .map(color_delta, subset=['pickup_revenue', 'pickup_rooms'])
-        .map(color_delta, subset=['pickup_adr'])
-        .background_gradient(cmap='Blues', subset=['revenue_curr'])
-        .format({
-            'pickup_revenue': '€ {:+,.0f}',
-            'pickup_rooms': '{:+,.0f}',
-            'pickup_adr': '€ {:+.2f}', 
-            'revenue_curr': '€ {:,.0f}'
-        }),
-        use_container_width=True,
-        column_config={
-            "pickup_revenue": "Var. Rev",
-            "pickup_rooms": "Var. Notti",
-            "pickup_adr": "Var. ADR", 
-            "revenue_curr": "Totale Attuale"
-        },
-        height=dynamic_height # Altezza automatica
-    )
+        except Exception as e:
+            st.error(f"Errore durante l'elaborazione: {e}")
+            st.info("Verifica che i file Excel abbiano le colonne 'Data', 'Revenue' e 'Camere' (o simili).")
