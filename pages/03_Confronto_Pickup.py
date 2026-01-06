@@ -244,18 +244,26 @@ if not daily_movers.empty:
         daily_movers,
         x='pickup_rooms',
         y='pickup_adr',
-        size=daily_movers['pickup_revenue'].abs(), # Grandezza bolla = impatto economico
-        color='pickup_revenue', # Colore = positivo/negativo
+        size=daily_movers['pickup_revenue'].abs(), # Grandezza bolla
+        size_max=50, # <--- LIMITIAMO LA GRANDEZZA MASSIMA per evitare sovrapposizioni enormi
+        color='pickup_revenue',
         color_continuous_scale=['#FF4B4B', '#FFFFFF', '#00C853'],
         hover_data=['revenue_curr'],
-        text=daily_movers.index # Mostra la data sulla bolla
+        hover_name=daily_movers.index # <--- ORA LA DATA APPARE NEL TOOLTIP (non stampata sopra)
     )
 
-    # Aggiungiamo linee assi cartesiani per creare i 4 quadranti
+    # Aggiungiamo linee assi cartesiani
     fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
     fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
 
-    fig_scatter.update_traces(textposition='top center')
+    # Modifiche estetiche per leggibilità
+    fig_scatter.update_traces(
+        marker=dict(
+            line=dict(width=1, color='DarkSlateGrey'), # <--- BORDO SCURO per separare le bolle
+            opacity=0.7 # <--- TRASPARENZA per vedere bolle sotto
+        ),
+        selector=dict(mode='markers')
+    )
     
     fig_scatter.update_layout(
         plot_bgcolor="rgba(0,0,0,0)",
