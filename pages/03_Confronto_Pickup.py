@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 import altair as alt
+import plotly.express as px  # AGGIUNTO PER HEATMAP
 from services import forecast_manager
 
 st.set_page_config(page_title="Confronto Pickup", layout="wide", initial_sidebar_state="collapsed")
@@ -171,8 +172,58 @@ st.dataframe(
 
 st.divider()
 
-# --- 6. LIVELLO 3: DETTAGLIO GIORNALIERO ---
-st.subheader("3️⃣ Dettaglio Giornaliero (Solo Variazioni)")
+# --- [NUOVO] LIVELLO 3: TOP & FLOP ---
+st.subheader("3️⃣ Top & Flop Dates")
+tf1, tf2 = st.columns(2)
+
+with tf1:
+    st.markdown("##### 🟢 Migliori Pickup")
+    top_gainers = df_pickup.nlargest(3, 'pickup_revenue')
+    for _, row in top_gainers.iterrows():
+        if row['pickup_revenue'] > 0:
+            st.success(f"**{row['date'].strftime('%d/%m')}**: +€ {row['pickup_revenue']:,.0f} ({row['pickup_rooms']:.0f} camere)")
+        else:
+            st.write("-")
+
+with tf2:
+    st.markdown("##### 🔴 Peggiori Cali")
+    top_losers = df_pickup.nsmallest(3, 'pickup_revenue')
+    for _, row in top_losers.iterrows():
+        if row['pickup_revenue'] < 0:
+            st.error(f"**{row['date'].strftime('%d/%m')}**: -€ {abs(row['pickup_revenue']):,.0f} ({row['pickup_rooms']:.0f} camere)")
+        else:
+            st.write("-")
+
+st.divider()
+
+# --- [NUOVO] LIVELLO 4: HEATMAP VISUALE ---
+st.subheader("4️⃣ Heatmap Temporale (Revenue)")
+st.markdown("Intensità del pickup nel tempo: **Verde** = Crescita, **Rosso** = Cancellazioni.")
+
+# Grafico Plotly
+fig_heat = px.bar(
+    df_pickup, 
+    x='date', 
+    y='pickup_revenue',
+    color='pickup_revenue',
+    color_continuous_scale=['#FF4B4B', '#FFFFFF', '#00C853'], # Rosso - Bianco - Verde
+    labels={'pickup_revenue': 'Pickup €', 'date': 'Data'}
+)
+fig_heat.update_layout(
+    plot_bgcolor="rgba(0,0,0,0)",
+    xaxis_title="",
+    yaxis_title="Variazione €",
+    height=350,
+    showlegend=False
+)
+# Linea dello zero
+fig_heat.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3)
+st.plotly_chart(fig_heat, use_container_width=True)
+
+st.divider()
+
+# --- 5. LIVELLO 5 (ex 3): DETTAGLIO GIORNALIERO ---
+st.subheader("5️⃣ Dettaglio Giornaliero (Solo Variazioni)")
 
 daily_movers = df_pickup[
     (df_pickup['pickup_revenue'].abs() > 0) | (df_pickup['pickup_rooms'].abs() > 0)
@@ -184,12 +235,7 @@ else:
     daily_movers['date_str'] = daily_movers['date'].dt.strftime('%d/%m %a')
     daily_movers = daily_movers.set_index('date_str')
     
-    # CALCOLO ALTEZZA DINAMICA
-    # +1 per l'intestazione, * 35 pixel per riga, + 3 pixel margine
     dynamic_height = (len(daily_movers) + 1) * 35 + 3
-    # Mettiamo un tetto massimo se vuoi evitare pagine infinite (es. max 800px), 
-    # altrimenti lascia pure dynamic_height puro.
-    # Qui uso dynamic_height puro così si vede TUTTO senza scroll interno.
     
     st.dataframe(
         daily_movers[['pickup_revenue', 'pickup_rooms', 'pickup_adr', 'revenue_curr']].style
@@ -209,5 +255,5 @@ else:
             "pickup_adr": "Var. ADR", 
             "revenue_curr": "Totale Attuale"
         },
-        height=dynamic_height # Altezza automatica
+        height=dynamic_height
     )
