@@ -231,3 +231,50 @@ fig_heat.update_layout(
 )
 fig_heat.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3)
 st.plotly_chart(fig_heat, use_container_width=True)
+
+st.divider()
+
+# --- SEZIONE 6: QUALITÀ DEL PICKUP (Volume vs Prezzo) ---
+st.subheader("6️⃣ Qualità del Pickup (Volume vs Prezzo)")
+st.markdown("Analisi della strategia: **Asse X** = Camere vendute, **Asse Y** = Variazione Prezzo.")
+
+# Creiamo il grafico solo se ci sono dati movimentati
+if not daily_movers.empty:
+    fig_scatter = px.scatter(
+        daily_movers,
+        x='pickup_rooms',
+        y='pickup_adr',
+        size=daily_movers['pickup_revenue'].abs(), # Grandezza bolla = impatto economico
+        color='pickup_revenue', # Colore = positivo/negativo
+        color_continuous_scale=['#FF4B4B', '#FFFFFF', '#00C853'],
+        hover_data=['revenue_curr'],
+        text=daily_movers.index # Mostra la data sulla bolla
+    )
+
+    # Aggiungiamo linee assi cartesiani per creare i 4 quadranti
+    fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+    fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+
+    fig_scatter.update_traces(textposition='top center')
+    
+    fig_scatter.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis_title="Variazione Camere (Volume)",
+        yaxis_title="Variazione ADR (Prezzo)",
+        height=450,
+        showlegend=False
+    )
+    
+    st.plotly_chart(fig_scatter, use_container_width=True)
+    
+    st.info("""
+    **Come leggere i 4 Quadranti:**
+    - ↗️ **Alto-Destra (Top):** Vendute più camere a prezzo più alto (Ottimo).
+    - ↘️ **Basso-Destra (Volume):** Vendute più camere ma abbassando il prezzo (Attenzione alla svendita).
+    - ↖️ **Alto-Sinistra (Prezzo):** Perse camere ma alzato il prezzo (Strategia di scrematura).
+    - ↙️ **Basso-Sinistra (Disastro):** Perse camere e perso prezzo (Allarme rosso).
+    """)
+else:
+    st.write("Dati insufficienti per il grafico a dispersione.")
+
+st.divider()
