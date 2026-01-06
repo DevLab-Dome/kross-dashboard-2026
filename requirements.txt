@@ -7,4 +7,3 @@ watchdog
 altair
 matplotlib
 boto3
-holidays
