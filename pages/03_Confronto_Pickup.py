@@ -7,18 +7,65 @@ from services import forecast_manager
 
 st.set_page_config(page_title="Confronto Pickup", layout="wide", initial_sidebar_state="collapsed")
 
-# --- CSS STILE ---
+# --- CSS STILE (CON FIX CENTRATURA) ---
 st.markdown("""
 <style>
     .centered-header { text-align: center; font-weight: bold; }
+    
+    /* METRICHE - CENTRATURA PERFETTA */
     div[data-testid="stMetric"] { 
         background-color: transparent; 
         border: 1px solid #e6e6e6; 
         padding: 15px; 
         border-radius: 10px;
-        text-align: center;
+        text-align: center !important;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
+    
+    /* ETICHETTA METRICA - CENTRATA */
+    div[data-testid="stMetricLabel"] {
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        text-align: center !important;
+        width: 100% !important;
+        margin: 0 auto !important;
+    }
+    
+    div[data-testid="stMetricLabel"] * {
+        text-align: center !important;
+        justify-content: center !important;
+        display: block !important;
+        font-size: 1rem !important;
+        font-weight: 500 !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+    
+    /* VALORE METRICA - CENTRATO */
+    div[data-testid="stMetricValue"] {
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        text-align: center !important;
+        width: 100% !important;
+    }
+    
+    div[data-testid="stMetricValue"] > div {
+        font-size: 2.5rem !important;
+        font-weight: 600 !important;
+        text-align: center !important;
+    }
+    
+    /* DELTA METRICA - CENTRATO */
+    div[data-testid="stMetricDelta"] {
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        width: 100% !important;
+        margin-top: 5px !important;
+    }
+    
     div[data-testid="stPills"] {
         justify-content: center;
     }
@@ -88,12 +135,19 @@ if df_pickup.empty:
     st.error("Errore dati.")
     st.stop()
 
-# --- SEZIONE 1: KPI ANNUALI ---
+# --- SEZIONE 1: KPI ANNUALI (NUOVA LOGICA) ---
 st.subheader("1️⃣ Variazioni Totali (Intero Anno)")
 
+# CALCOLO SEPARATO: Nuove Prenotazioni vs Cancellazioni
 tot_rev_pickup = df_pickup['pickup_revenue'].sum()
-tot_rooms_pickup = df_pickup['pickup_rooms'].sum()
 
+# Pickup Notti LORDE (solo nuove prenotazioni)
+new_bookings = df_pickup[df_pickup['pickup_rooms'] > 0]['pickup_rooms'].sum()
+
+# Cancellazioni (valore assoluto delle notti perse)
+cancellations = abs(df_pickup[df_pickup['pickup_rooms'] < 0]['pickup_rooms'].sum())
+
+# ADR e RevPAR globali
 tot_rev_curr = df_pickup['revenue_curr'].sum()
 tot_rooms_curr = df_pickup['rooms_sold_curr'].sum()
 global_adr_curr = tot_rev_curr / tot_rooms_curr if tot_rooms_curr > 0 else 0
@@ -103,16 +157,19 @@ tot_rooms_prev = df_pickup['rooms_sold_prev'].sum()
 global_adr_prev = tot_rev_prev / tot_rooms_prev if tot_rooms_prev > 0 else 0
 
 delta_adr_global = global_adr_curr - global_adr_prev
+
 tot_capacity = df_pickup['rooms_curr'].sum() if 'rooms_curr' in df_pickup.columns else 1 
 global_revpar_curr = tot_rev_curr / tot_capacity
 global_revpar_prev = tot_rev_prev / tot_capacity
 delta_revpar_global = global_revpar_curr - global_revpar_prev
 
-k1, k2, k3, k4 = st.columns(4)
+# NUOVO ORDINE: Revenue | Notti Lorde | Cancellazioni | Var. ADR | Var. RevPAR
+k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Pickup Revenue", f"€ {tot_rev_pickup:+,.0f}")
-k2.metric("Pickup Notti", f"{tot_rooms_pickup:+,.0f}")
-k3.metric("Var. ADR Globale", f"€ {delta_adr_global:+.2f}")
-k4.metric("Var. RevPAR", f"€ {delta_revpar_global:+.2f}")
+k2.metric("Pickup Notti", f"+{int(new_bookings)}")
+k3.metric("Cancellazioni", f"-{int(cancellations)}", delta_color="inverse")
+k4.metric("Var. ADR Globale", f"€ {delta_adr_global:+.2f}")
+k5.metric("Var. RevPAR", f"€ {delta_revpar_global:+.2f}")
 
 st.divider()
 
@@ -155,7 +212,7 @@ st.dataframe(
 
 st.divider()
 
-# --- SEZIONE 3: DETTAGLIO GIORNALIERO (Spostato qui) ---
+# --- SEZIONE 3: DETTAGLIO GIORNALIERO ---
 st.subheader("3️⃣ Dettaglio Giornaliero (Solo Variazioni)")
 
 daily_movers = df_pickup[
@@ -189,7 +246,7 @@ else:
 
 st.divider()
 
-# --- SEZIONE 4: TOP & FLOP (Spostato qui) ---
+# --- SEZIONE 4: TOP & FLOP ---
 st.subheader("4️⃣ Top & Flop Dates")
 tf1, tf2 = st.columns(2)
 
@@ -213,7 +270,7 @@ with tf2:
 
 st.divider()
 
-# --- SEZIONE 5: HEATMAP (Spostato qui) ---
+# --- SEZIONE 5: HEATMAP ---
 st.subheader("5️⃣ Heatmap Temporale (Revenue)")
 st.markdown("Intensità del pickup nel tempo: **Verde** = Crescita, **Rosso** = Cancellazioni.")
 
@@ -234,33 +291,30 @@ st.plotly_chart(fig_heat, use_container_width=True)
 
 st.divider()
 
-# --- SEZIONE 6: QUALITÀ DEL PICKUP (Volume vs Prezzo) ---
+# --- SEZIONE 6: QUALITÀ DEL PICKUP ---
 st.subheader("6️⃣ Qualità del Pickup (Volume vs Prezzo)")
 st.markdown("Analisi della strategia: **Asse X** = Camere vendute, **Asse Y** = Variazione Prezzo.")
 
-# Creiamo il grafico solo se ci sono dati movimentati
 if not daily_movers.empty:
     fig_scatter = px.scatter(
         daily_movers,
         x='pickup_rooms',
         y='pickup_adr',
-        size=daily_movers['pickup_revenue'].abs(), # Grandezza bolla
-        size_max=50, # <--- LIMITIAMO LA GRANDEZZA MASSIMA per evitare sovrapposizioni enormi
+        size=daily_movers['pickup_revenue'].abs(),
+        size_max=50,
         color='pickup_revenue',
         color_continuous_scale=['#FF4B4B', '#FFFFFF', '#00C853'],
         hover_data=['revenue_curr'],
-        hover_name=daily_movers.index # <--- ORA LA DATA APPARE NEL TOOLTIP (non stampata sopra)
+        hover_name=daily_movers.index
     )
 
-    # Aggiungiamo linee assi cartesiani
     fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
     fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
 
-    # Modifiche estetiche per leggibilità
     fig_scatter.update_traces(
         marker=dict(
-            line=dict(width=1, color='DarkSlateGrey'), # <--- BORDO SCURO per separare le bolle
-            opacity=0.7 # <--- TRASPARENZA per vedere bolle sotto
+            line=dict(width=1, color='DarkSlateGrey'),
+            opacity=0.7
         ),
         selector=dict(mode='markers')
     )
